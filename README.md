@@ -12,6 +12,11 @@ pip install -r requirements.txt
 python -m unittest discover -s tests -v        # offline tests, no network
 python -m scanner.snapshot --leagues nfl,cfb --days 7
 ```
+If PowerShell blocks the activate script, run
+```powershell
+Set-ExecutionPolicy -Scope Process RemoteSigned
+```
+
 Results print to the console and are saved to `output/snapshot_<time>.csv` (every matched game, not just
 profitable ones).
 
