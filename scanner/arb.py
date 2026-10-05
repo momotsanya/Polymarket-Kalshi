@@ -66,3 +66,61 @@ def evaluate(kgame: dict, mapping: dict, pgame: dict, poly_asks: dict, min_size:
             if best is None or opp.net_per_contract > best.net_per_contract:
                 best = opp
     return best
+
+
+def evaluate_soccer(kgame: dict, mapping: dict, pgame: dict, poly_quotes: dict, min_size: float = 1.0) -> Opportunity | None:
+    """Three-outcome match. poly_quotes: {'team0'|'team1'|'draw': {'yes': (ask, size)|None, 'no': (ask, size)|None}}.
+
+    Two kinds of surebet are checked, all buying at the ask as taker:
+      1. Complement: YES of an outcome on one platform + NO of the SAME outcome on the other (pays $1 exactly).
+      2. Cover: the cheapest YES (after fees) for each of home / draw / away (pays $1 exactly).
+    Returns the best candidate, even if its net edge is negative."""
+    outcomes = [(kgame["teams"][ki]["name"], kgame["teams"][ki], f"team{mapping[ki]}") for ki in (0, 1)]
+    outcomes.append(("Draw", kgame["draw"], "draw"))
+
+    best = None
+
+    def consider(opp):
+        nonlocal best
+        if best is None or opp.net_per_contract > best.net_per_contract:
+            best = opp
+
+    # 1. complement per outcome
+    for label, k, pkey in outcomes:
+        sched = pgame["markets"][pkey]["fee_schedule"]
+        pq = poly_quotes.get(pkey) or {}
+        for kp, ks, klabel, pside in ((k["yes_ask"], k["yes_ask_size"], f"Kalshi YES {label}", "no"),
+                                      (k["no_ask"], k["no_ask_size"], f"Kalshi NO {label}", "yes")):
+            q = pq.get(pside)
+            if q is None or not _ok(kp, ks, min_size) or not _ok(q[0], q[1], min_size):
+                continue
+            pp, ps = q
+            fees = kalshi_fee(kp) + polymarket_fee(pp, sched)
+            consider(Opportunity(
+                description=f"{klabel} @ {kp:.2f} + Polymarket {pside.upper()} {label} @ {pp:.2f}",
+                kalshi_price=kp, poly_price=pp, fees=fees,
+                net_per_contract=1.0 - kp - pp - fees, size=min(ks, ps)))
+
+    # 2. cover all three outcomes with the cheapest YES of each
+    legs = []
+    for label, k, pkey in outcomes:
+        cands = []
+        if _ok(k["yes_ask"], k["yes_ask_size"], min_size):
+            cands.append((k["yes_ask"] + kalshi_fee(k["yes_ask"]), "Kalshi", k["yes_ask"], k["yes_ask_size"], label))
+        q = (poly_quotes.get(pkey) or {}).get("yes")
+        if q is not None and _ok(q[0], q[1], min_size):
+            sched = pgame["markets"][pkey]["fee_schedule"]
+            cands.append((q[0] + polymarket_fee(q[0], sched), "Polymarket", q[0], q[1], label))
+        if not cands:
+            legs = []
+            break
+        legs.append(min(cands))
+    if len(legs) == 3:
+        total_cost = sum(leg[0] for leg in legs)
+        kp = sum(leg[2] for leg in legs if leg[1] == "Kalshi")
+        pp = sum(leg[2] for leg in legs if leg[1] == "Polymarket")
+        consider(Opportunity(
+            description="Cover 3: " + ", ".join(f"{leg[1]} YES {leg[4]} @ {leg[2]:.2f}" for leg in legs),
+            kalshi_price=kp, poly_price=pp, fees=total_cost - kp - pp,
+            net_per_contract=1.0 - total_cost, size=min(leg[3] for leg in legs)))
+    return best

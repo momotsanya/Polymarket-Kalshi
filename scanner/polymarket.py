@@ -6,8 +6,10 @@ from datetime import datetime, timedelta, timezone
 from .config import CLOB_BASE, GAMMA_BASE
 
 
-def fetch_game_events(client, series_id: int, days: int = 7, page: int = 50, max_pages: int = 20) -> list[dict]:
+def fetch_game_events(client, series_id: int, days: int = 7, page: int = 50, max_pages: int = 20,
+                      parser=None) -> list[dict]:
     """Upcoming (not yet started) game events for a league series within `days` days."""
+    parser = parser or parse_game
     now = datetime.now(timezone.utc)
     horizon = now + timedelta(days=days)
     games, offset = [], 0
@@ -17,7 +19,7 @@ def fetch_game_events(client, series_id: int, days: int = 7, page: int = 50, max
         r.raise_for_status()
         events = r.json()
         for e in events:
-            g = parse_game(e)
+            g = parser(e)
             if g and now <= g["start"] <= horizon:
                 games.append(g)
         if len(events) < page:
@@ -70,3 +72,48 @@ def best_ask(client, token_id: str) -> tuple[float, float] | None:
         return None
     best = min(asks, key=lambda a: float(a["price"]))
     return float(best["price"]), float(best["size"])
+
+
+def parse_soccer_game(event: dict) -> dict | None:
+    """Soccer match event: exactly three 'moneyline' Yes/No markets (home win, draw, away win).
+    Half-time, exact-score, corners etc. are separate events/types and are rejected here."""
+    teams = event.get("teams") or []
+    markets = event.get("markets") or []
+    if (len(teams) != 2 or len(markets) != 3 or " - " in (event.get("title") or "")
+            or not event.get("startTime") or not event.get("eventDate")):
+        return None
+    if any(m.get("sportsMarketType") != "moneyline" or not m.get("acceptingOrders", True) for m in markets):
+        return None
+    names = [t.get("name", "") for t in teams]
+    out: dict[str, dict] = {}
+    for m in markets:
+        try:
+            outcomes = json.loads(m["outcomes"]) if isinstance(m["outcomes"], str) else m["outcomes"]
+            tokens = json.loads(m["clobTokenIds"]) if isinstance(m["clobTokenIds"], str) else m["clobTokenIds"]
+        except (KeyError, TypeError, ValueError):
+            return None
+        idx = {o.strip().lower(): i for i, o in enumerate(outcomes)}
+        if "yes" not in idx or "no" not in idx or len(tokens) != 2:
+            return None
+        item = (m.get("groupItemTitle") or "").strip()
+        if item.lower().startswith("draw"):
+            key = "draw"
+        elif item in names:
+            key = f"team{names.index(item)}"
+        else:
+            return None
+        if key in out:
+            return None
+        out[key] = {"yes_token": tokens[idx["yes"]], "no_token": tokens[idx["no"]],
+                    "fee_schedule": m.get("feeSchedule"), "description": m.get("description", "")}
+    if len(out) != 3:
+        return None
+    return {
+        "slug": event.get("slug"),
+        "us_slug": event.get("usId"),
+        "date": datetime.strptime(event["eventDate"], "%Y-%m-%d").date(),
+        "start": datetime.fromisoformat(event["startTime"].replace("Z", "+00:00")),
+        "teams": [{"name": n} for n in names],
+        "markets": out,
+        "rules_ok": all("90 minutes" in v["description"] for v in out.values()),
+    }

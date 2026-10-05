@@ -67,3 +67,37 @@ def to_game(event_ticker: str, markets: list[dict]) -> dict | None:
             "no_ask_size": _f(m.get("yes_bid_size_fp")) if yes_bid is not None else None,
         })
     return {"event_ticker": event_ticker, "date": d, "teams": teams}
+
+
+def _quote(m: dict) -> dict:
+    yes_bid = _f(m.get("yes_bid_dollars"))
+    return {
+        "name": m.get("yes_sub_title") or "",
+        "ticker": m["ticker"],
+        "yes_ask": _f(m.get("yes_ask_dollars")),
+        "yes_ask_size": _f(m.get("yes_ask_size_fp")),
+        "no_ask": _f(m.get("no_ask_dollars")),
+        # a NO ask is a resting YES bid, so its size is the YES bid size
+        "no_ask_size": _f(m.get("yes_bid_size_fp")) if yes_bid is not None else None,
+    }
+
+
+def to_soccer_game(event_ticker: str, markets: list[dict]) -> dict | None:
+    """Three markets per match: '<Team> wins' x2 and 'Tie'. Settles on 90 min + stoppage time."""
+    if len(markets) != 3:
+        return None
+    d = event_date(event_ticker)
+    if d is None:
+        return None
+    ties = [m for m in markets if (m.get("yes_sub_title") or "").strip().lower() == "tie"]
+    teams = [m for m in markets if m not in ties]
+    if len(ties) != 1 or len(teams) != 2:
+        return None
+    rules = (ties[0].get("rules_primary") or "").lower()
+    return {
+        "event_ticker": event_ticker,
+        "date": d,
+        "teams": [_quote(m) for m in teams],
+        "draw": _quote(ties[0]),
+        "rules_ok": "90 minutes" in rules and "does not include extra time" in rules,
+    }
